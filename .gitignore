@@ -1,0 +1,4 @@
+# Ignore packaging files
+*.pkg.tar.zst
+pkg/
+src/ 
