@@ -9,7 +9,7 @@ license=('MIT')
 depends=('gum' 'fzf' 'gnome-desktop')
 optdepends=('kitty: for image previews in the terminal')
 source=("$pkgname-$pkgver.tar.gz::$url/archive/v$pkgver.tar.gz")
-sha256sums=('SKIP') # Use 'updpkgsums' to generate this
+sha256sums=('57e658996f5377fc061011aab5fe639a88dc3ce4bd727046f2bbffb36bba8324')
 
 package() {
 	cd "$srcdir/$pkgname-$pkgver"

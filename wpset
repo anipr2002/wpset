@@ -1,141 +1,314 @@
 #!/bin/bash
 
 # GNOME Wallpaper Selector Script
-# Usage: ./set-wallpaper.sh [directory]
-# If no directory is provided, defaults to ~/Pictures
+# A simple, interactive wallpaper selector for GNOME desktops.
 
-# --- HELP FUNCTION ---
-show_help() {
-    cat << EOF
-wpset - A simple, interactive wallpaper selector for GNOME desktops.
+# --- CONFIGURATION ---
+WPSET_CONFIG_DIR="$HOME/.config/wpset"
+WPSET_CONFIG_FILE="$WPSET_CONFIG_DIR/config"
 
-USAGE:
-    wpset [OPTIONS] [DIRECTORY]
+# --- UTILITY FUNCTIONS ---
 
-DESCRIPTION:
-    This script allows you to interactively select a wallpaper from a
-    given directory and set it as your GNOME desktop background.
+# Create config directory if it doesn't exist
+ensure_config_dir() {
+    if [ ! -d "$WPSET_CONFIG_DIR" ]; then
+        mkdir -p "$WPSET_CONFIG_DIR"
+    fi
+}
 
-    It uses 'gum' for folder navigation and 'fzf' for image selection.
-    If using 'kitty' terminal, it will display image previews.
+# Load configuration
+load_config() {
+    ensure_config_dir
+    if [ -f "$WPSET_CONFIG_FILE" ]; then
+        source "$WPSET_CONFIG_FILE"
+    fi
+    
+    # Set default path if not configured
+    if [ -z "$WPSET_DEFAULT_PATH" ]; then
+        WPSET_DEFAULT_PATH="$HOME/Pictures"
+    fi
+}
 
-OPTIONS:
-    -h, --help    Show this help message and exit.
-
-ARGUMENTS:
-    <DIRECTORY>   The directory to search for wallpapers in.
-                  If not provided, defaults to '$HOME/Pictures'.
+# Save configuration
+save_config() {
+    ensure_config_dir
+    cat > "$WPSET_CONFIG_FILE" << EOF
+# wpset configuration file
+WPSET_DEFAULT_PATH="$WPSET_DEFAULT_PATH"
 EOF
 }
 
-# --- ARGUMENT PARSING ---
+# --- DEPENDENCY CHECKS ---
+check_dependencies() {
+    local missing_deps=()
+
+    # Check if gum is installed
+    if ! command -v gum &> /dev/null; then
+        echo "gum is not installed."
+        if command -v pacman &> /dev/null; then
+            if gum confirm "Do you want to install gum now with 'sudo pacman -S gum'?"; then
+                sudo pacman -S gum
+                if ! command -v gum &> /dev/null; then
+                    echo "Error: gum installation failed. Please install it manually."
+                    exit 1
+                fi
+            else
+                echo "gum is required for this script. Please install it to continue."
+                exit 1
+            fi
+        else
+            echo "Error: Cannot install gum automatically. Please install it from:"
+            echo "https://github.com/charmbracelet/gum"
+            exit 1
+        fi
+    fi
+
+    # Check if fzf is installed
+    if ! command -v fzf &> /dev/null; then
+        missing_deps+=("fzf")
+    fi
+
+    # Check if kitty is installed (for image preview)
+    if ! command -v kitty &> /dev/null; then
+        gum style --foreground 3 "Warning: kitty is not installed. Image preview will not work."
+        gum style --foreground 3 "You can install it with: sudo pacman -S kitty"
+    fi
+
+    if [ ${#missing_deps[@]} -ne 0 ]; then
+        gum style --foreground 1 "Error: Missing required dependencies: ${missing_deps[*]}"
+        echo "On Arch Linux, install with: sudo pacman -S ${missing_deps[*]}"
+        exit 1
+    fi
+}
+
+# --- HELP FUNCTION ---
+show_help() {
+    local help_text=$(cat << 'EOF'
+wpset - A simple, interactive wallpaper selector for GNOME desktops.
+
+DESCRIPTION:
+    This script provides an interactive menu to manage your GNOME desktop
+    wallpapers. You can set wallpapers, set random wallpapers, configure
+    settings, and view this help.
+
+FEATURES:
+    • Set Wallpaper: Interactively browse and select wallpapers
+    • Set Random: Randomly select and apply a wallpaper
+    • Settings: Configure default wallpaper directory
+    • Help: Display this help information
+
+MENU OPTIONS:
+    Set wallpaper    Browse and select a wallpaper interactively
+    Set random       Randomly select and apply a wallpaper  
+    Settings         Configure default paths and preferences
+    Help             Show this help information
+
+DEPENDENCIES:
+    • gum  - For interactive menus and interface elements
+    • fzf  - For file selection and filtering
+    • kitty (optional) - For image previews
+
+CONFIGURATION:
+    Configuration is stored in: ~/.config/wpset/config
+    Default wallpaper path can be set in Settings menu.
+
+AUTHOR:
+    Created for GNOME desktop environments.
+EOF
+)
+    
+    echo "$help_text" | gum pager
+}
+
+# --- WALLPAPER FUNCTIONS ---
+
+# Select and set wallpaper
+set_wallpaper() {
+    local search_dir="$WPSET_DEFAULT_PATH"
+    
+    # Allow user to choose different directory if they want
+    if gum confirm "Use default directory ($WPSET_DEFAULT_PATH)?"; then
+        search_dir="$WPSET_DEFAULT_PATH"
+    else
+        search_dir=$(gum input --placeholder "Enter directory path" --value "$WPSET_DEFAULT_PATH")
+    fi
+
+    # Check if the directory exists
+    if [ ! -d "$search_dir" ]; then
+        gum style --foreground 1 "Error: Directory '$search_dir' does not exist."
+        return 1
+    fi
+
+    # Find all directories inside the base directory
+    local directories=$(find "$search_dir" -type d 2>/dev/null | sort)
+
+    if [ -z "$directories" ]; then
+        gum style --foreground 3 "No sub-directories found in '$search_dir'. Searching for images there."
+        local chosen_dir="$search_dir"
+    else
+        # Use gum to let the user choose a directory
+        local chosen_dir=$(echo "$directories" | gum choose --header "Select a directory to search for wallpapers" --height 20)
+
+        # If the user pressed Esc or didn't select anything, return
+        if [ -z "$chosen_dir" ]; then
+            gum style --foreground 3 "No directory selected."
+            return 0
+        fi
+    fi
+
+    gum style --foreground 6 "Searching for images in '$chosen_dir'..."
+
+    # Find images and let user select with fzf
+    local selected_image
+    if command -v kitty &> /dev/null; then
+        selected_image=$(find "$chosen_dir" -maxdepth 1 -type f \( -name "*.png" -o -name "*.jpg" -o -name "*.jpeg" -o -name "*.PNG" -o -name "*.JPG" -o -name "*.JPEG" \) 2>/dev/null | \
+            fzf --preview='kitty icat --clear --transfer-mode=memory --stdin=no --place=${FZF_PREVIEW_COLUMNS}x${FZF_PREVIEW_LINES}@0x0 {}' \
+                --preview-window=right:50% \
+                --prompt="Select wallpaper: " \
+                --height=80%)
+    else
+        selected_image=$(find "$chosen_dir" -maxdepth 1 -type f \( -name "*.png" -o -name "*.jpg" -o -name "*.jpeg" -o -name "*.PNG" -o -name "*.JPG" -o -name "*.JPEG" \) 2>/dev/null | \
+            fzf --prompt="Select wallpaper: " \
+                --height=80%)
+    fi
+
+    # Clear any lingering kitty image previews after fzf exits
+    if command -v kitty &> /dev/null; then
+        kitty icat --clear
+    fi
+
+    # Check if user selected an image
+    if [ -z "$selected_image" ]; then
+        gum style --foreground 3 "No image selected."
+        return 0
+    fi
+
+    # Set the wallpaper
+    apply_wallpaper "$selected_image"
+}
+
+# Set random wallpaper
+set_random_wallpaper() {
+    local search_dir="$WPSET_DEFAULT_PATH"
+    
+    # Check if the directory exists
+    if [ ! -d "$search_dir" ]; then
+        gum style --foreground 1 "Error: Default directory '$search_dir' does not exist."
+        gum style --foreground 3 "Please configure the default path in Settings."
+        return 1
+    fi
+
+    gum style --foreground 6 "Searching for images in '$search_dir' and subdirectories..."
+
+    # Find all images recursively
+    local images=$(find "$search_dir" -type f \( -name "*.png" -o -name "*.jpg" -o -name "*.jpeg" -o -name "*.PNG" -o -name "*.JPG" -o -name "*.JPEG" \) 2>/dev/null)
+
+    if [ -z "$images" ]; then
+        gum style --foreground 1 "No images found in '$search_dir'."
+        return 1
+    fi
+
+    # Get random image
+    local image_count=$(echo "$images" | wc -l)
+    local random_line=$((RANDOM % image_count + 1))
+    local selected_image=$(echo "$images" | sed -n "${random_line}p")
+
+    gum style --foreground 6 "Randomly selected: $(basename "$selected_image")"
+    
+    # Set the wallpaper
+    apply_wallpaper "$selected_image"
+}
+
+# Apply wallpaper
+apply_wallpaper() {
+    local image_path="$1"
+    
+    # Convert to absolute path
+    local absolute_path=$(realpath "$image_path")
+
+    # Set as wallpaper using gsettings
+    gum style --foreground 2 "Setting wallpaper to: $(basename "$absolute_path")"
+    gsettings set org.gnome.desktop.background picture-uri "file://$absolute_path"
+    gsettings set org.gnome.desktop.background picture-uri-dark "file://$absolute_path"
+
+    gum style --foreground 2 "✓ Wallpaper set successfully!"
+}
+
+# --- SETTINGS FUNCTION ---
+show_settings() {
+    while true; do
+        local choice=$(gum choose --header "⚙️  Settings" \
+            "Set default wallpaper directory" \
+            "View current settings" \
+            "Back to main menu")
+
+        case "$choice" in
+            "Set default wallpaper directory")
+                local new_path=$(gum file --directory --header "Select default wallpaper directory")
+                if [ -n "$new_path" ]; then
+                    WPSET_DEFAULT_PATH="$new_path"
+                    save_config
+                    gum style --foreground 2 "✓ Default path updated to: $WPSET_DEFAULT_PATH"
+                fi
+                ;;
+            "View current settings")
+                gum style --border normal --margin "1" --padding "1 2" --border-foreground 6 \
+                    "Current Settings:" \
+                    "" \
+                    "Default wallpaper directory: $WPSET_DEFAULT_PATH" \
+                    "Config file: $WPSET_CONFIG_FILE"
+                ;;
+            "Back to main menu"|"")
+                break
+                ;;
+        esac
+    done
+}
+
+# --- MAIN MENU ---
+main_menu() {
+    while true; do
+        local choice=$(gum choose --header "🖼️  wpset - Wallpaper Manager" \
+            "Set wallpaper" \
+            "Set random" \
+            "Settings" \
+            "Help" \
+            "Exit")
+
+        case "$choice" in
+            "Set wallpaper")
+                set_wallpaper
+                ;;
+            "Set random")
+                set_random_wallpaper
+                ;;
+            "Settings")
+                show_settings
+                ;;
+            "Help")
+                show_help
+                ;;
+            "Exit"|"")
+                gum style --foreground 2 "Goodbye! 👋"
+                exit 0
+                ;;
+        esac
+    done
+}
+
+# --- MAIN EXECUTION ---
+
+# Handle command line arguments
 if [[ "$1" == "--help" || "$1" == "-h" ]]; then
     show_help
     exit 0
 fi
 
-# --- DEPENDENCY CHECKS ---
+# Check dependencies
+check_dependencies
 
-# Check if gum is installed, and offer to install it if not.
-if ! command -v gum &> /dev/null; then
-    echo "gum is not installed."
-    if command -v pacman &> /dev/null; then
-        read -p "Do you want to install it now with 'sudo pacman -S gum'? [Y/n] " -n 1 -r
-        echo
-        if [[ $REPLY =~ ^[Yy]$ || $REPLY == "" ]]; then
-            sudo pacman -S gum
-            if ! command -v gum &> /dev/null; then
-                echo "Error: gum installation failed. Please install it manually."
-                exit 1
-            fi
-        else
-            echo "gum is required for folder navigation. Please install it to use this script."
-            exit 1
-        fi
-    else
-        echo "Error: Cannot install gum automatically. Please install it from:"
-        echo "https://github.com/charmbracelet/gum"
-        exit 1
-    fi
-fi
+# Load configuration
+load_config
 
-# Check if fzf is installed
-if ! command -v fzf &> /dev/null; then
-    echo "Error: fzf is not installed. Please install it first."
-    echo "On Arch Linux: sudo pacman -S fzf"
-    exit 1
-fi
-
-# Check if kitty is installed (for image preview)
-if ! command -v kitty &> /dev/null; then
-    echo "Warning: kitty is not installed. Image preview will not work."
-    echo "You can install it with: sudo pacman -S kitty"
-    echo "Or remove the --preview option from the script."
-fi
-
-
-# --- DIRECTORY SELECTION ---
-
-# Set the base search directory (default to ~/Pictures if no argument provided)
-BASE_SEARCH_DIR="${1:-$HOME/Pictures}"
-
-# Check if the base directory exists
-if [ ! -d "$BASE_SEARCH_DIR" ]; then
-    echo "Error: Directory '$BASE_SEARCH_DIR' does not exist."
-    exit 1
-fi
-
-# Find all directories inside the base directory and let the user choose
-# The 'find' command will also list the base directory itself.
-DIRECTORIES=$(find "$BASE_SEARCH_DIR" -type d 2>/dev/null | sort)
-
-if [ -z "$DIRECTORIES" ]; then
-    echo "No sub-directories found in '$BASE_SEARCH_DIR'. Searching for images there."
-    SEARCH_DIR="$BASE_SEARCH_DIR"
-else
-    # Use gum to let the user choose a directory
-    CHOSEN_DIR=$(echo "$DIRECTORIES" | gum choose --header "Select a directory to search for wallpapers" --height 20)
-
-    # If the user pressed Esc or didn't select anything, exit gracefully
-    if [ -z "$CHOSEN_DIR" ]; then
-        echo "No directory selected. Exiting."
-        exit 0
-    fi
-    SEARCH_DIR="$CHOSEN_DIR"
-fi
-
-
-# --- WALLPAPER SELECTION AND SETTING ---
-
-echo "Searching for images in '$SEARCH_DIR'..."
-
-# Find images and let user select with fzf
-SELECTED_IMAGE=$(find "$SEARCH_DIR" -maxdepth 1 -type f \( -name "*.png" -o -name "*.jpg" -o -name "*.jpeg" -o -name "*.PNG" -o -name "*.JPG" -o -name "*.JPEG" \) 2>/dev/null | \
-    fzf --preview='kitty icat --clear --transfer-mode=memory --stdin=no --place=${FZF_PREVIEW_COLUMNS}x${FZF_PREVIEW_LINES}@0x0 {}' \
-        --preview-window=right:50% \
-        --prompt="Select wallpaper: " \
-        --height=80%)
-
-# Clear any lingering kitty image previews after fzf exits.
-if command -v kitty &> /dev/null; then
-    kitty icat --clear
-fi
-
-# Check if user selected an image
-if [ -z "$SELECTED_IMAGE" ]; then
-    echo "No image selected. Exiting."
-    exit 0
-fi
-
-# Convert to absolute path
-SELECTED_IMAGE=$(realpath "$SELECTED_IMAGE")
-
-# Set as wallpaper using gsettings
-echo "Setting wallpaper to: $SELECTED_IMAGE"
-gsettings set org.gnome.desktop.background picture-uri "file://$SELECTED_IMAGE"
-gsettings set org.gnome.desktop.background picture-uri-dark "file://$SELECTED_IMAGE"
-
-echo "Wallpaper set successfully!"
-
-# Optional: Show current wallpaper info
-echo "Current wallpaper: $(gsettings get org.gnome.desktop.background picture-uri)" 
+# Start main menu
+main_menu 
